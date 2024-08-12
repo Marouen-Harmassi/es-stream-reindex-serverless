@@ -1,0 +1,134 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 2,
+    "index.mapping.total_fields.limit": 1500,
+    "analysis": {
+      "normalizer": {
+        "lowercase_trim_normalizer": {
+          "type": "custom",
+          "filter": [
+            "lowercase",
+            "trim"
+          ]
+        }
+      },
+      "tokenizer": {
+        "autocomplete_tokenizer": {
+          "type": "edge_ngram",
+          "min_gram": 1,
+          "max_gram": 20,
+          "token_chars": []
+        }
+      },
+      "analyzer": {
+        "autocomplete": {
+          "tokenizer": "autocomplete_tokenizer",
+          "filter": [
+            "lowercase",
+            "trim"
+          ]
+        },
+        "autocomplete_phone": {
+          "tokenizer": "autocomplete_tokenizer",
+          "filter": [
+            "phone_search",
+            "trim"
+          ]
+        },
+        "email_domain": {
+          "tokenizer": "uax_url_email",
+          "filter": [
+            "email_domains",
+            "lowercase",
+            "unique"
+          ]
+        }
+      },
+      "filter": {
+        "email_domains": {
+          "type": "pattern_capture",
+          "preserve_original" : false,
+          "patterns": [
+            "@(.+)"
+          ]
+        },
+        "phone_search": {
+          "type": "pattern_capture",
+          "preserve_original" : false,
+          "patterns": [
+            "\\+(.+)"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "_doc": {
+      "properties": {
+        "correlation_id": {
+          "type": "keyword",
+          "normalizer": "lowercase_trim_normalizer",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "autocomplete",
+              "search_analyzer": "standard"
+            }
+          }
+        },
+        "civility": {
+          "type": "keyword"
+        },
+        "email": {
+          "type": "keyword",
+          "normalizer": "lowercase_trim_normalizer",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "autocomplete",
+              "search_analyzer": "standard"
+            },
+            "domain": {
+              "type": "text",
+              "analyzer": "email_domain",
+              "search_analyzer": "standard"
+            }
+          }
+        },
+        "firstname": {
+          "type": "keyword",
+          "normalizer": "lowercase_trim_normalizer",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "autocomplete",
+              "search_analyzer": "standard"
+            }
+          }
+        },
+        "lastname": {
+          "type": "keyword",
+          "normalizer": "lowercase_trim_normalizer",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "autocomplete",
+              "search_analyzer": "standard"
+            }
+          }
+        },
+        "phone": {
+          "type": "keyword",
+          "fields": {
+            "autocomplete": {
+              "type": "text",
+              "analyzer": "autocomplete_phone",
+              "search_analyzer": "standard"
+            }
+          }
+        }
+      }
+    }
+  }
+}

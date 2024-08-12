@@ -1,0 +1,23 @@
+node_modules
+.serverless
+yarn-error.log
+/.idea
+*.iml
+/var
+/.env
+/.env.local
+/coverage
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# TypeScript compiler builds
+lib
+out
+reports
+dist
+build

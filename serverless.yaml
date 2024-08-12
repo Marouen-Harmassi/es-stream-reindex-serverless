@@ -1,0 +1,218 @@
+service: es-stream-reindex-serverless
+
+plugins:
+  - serverless-plugin-resource-tagging
+  - serverless-prune-plugin
+  - serverless-tag-cloud-watch-logs
+  - serverless-step-functions
+  - serverless-webpack
+
+package:
+  exclude:
+    - "**/*"
+  include:
+    - src
+    - package.json
+    - package-lock.json
+
+params:
+  default:
+    prefix: es-stream-reindex
+    displayName: ${param:prefix}
+    stackName: ${self:service}-${sls:stage}
+    deploymentBucket: applications.${self:provider.region}.${param:awsAccountId}.${sls:stage}
+    bloc: ""
+    app: ""
+    comp: ""
+    team: ""
+    env: ${sls:stage}
+    isInfraAsCode: serverless
+    metricBillingStatus: "BillingStatus"
+    logIndex: es-stream-reindex
+    logMinLevel: info
+  dev:
+    awsAccountId: ""
+    awsSubnetIdForInstancesForLambdas: [""]
+    awsVpc: ""
+    snsAlarm: ""
+    waitScanBulkAfter: 1
+  test:
+    awsAccountId: ""
+    awsSubnetIdForInstancesForLambdas: []
+    awsVpc: ""
+    snsAlarm: ""
+    waitScanBulkAfter: 1
+  prod:
+    awsAccountId: ""
+    awsSubnetIdForInstancesForLambdas: [""]
+    awsVpc: ""
+    snsAlarm: ""
+    waitScanBulkAfter: 3
+
+custom:
+  webpack:
+    includeModules: true
+    webpackConfig: webpack.config.js
+  cloudWatchLogsTags:
+    App: ${param:app}
+    Bloc: ${param:bloc}
+    Comp: ${param:comp}
+    Team: ${param:team}
+    IsInfraAsCode: ${param:isInfraAsCode}
+    Env: ${sls:stage}
+    Name: ${param:stackName}
+
+provider:
+  name: aws
+  architecture: arm64
+  stage: ${opt:stage}
+  memorySize: 128
+  runtime: nodejs18.x
+  region: "eu-west-1"
+  timeout: 30
+  versionFunctions: false
+  deploymentBucket: applications.${self:provider.region}.${param:awsAccountId}.${sls:stage}
+  logRetentionInDays: 1
+  iam:
+    deploymentRole: ""
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - "es:ESHttp*"
+          Resource:
+            - "" # TODO
+
+        - Effect: Allow
+          Action:
+            - "dynamodb:Scan"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:DeleteItem"
+          Resource:
+            - "" #TODO
+        - Effect: "Allow"
+          Action:
+            - "kinesis:PutRecords"
+          Resource:
+            - "" #TODO
+        - Effect: "Allow"
+          Action:
+            - "cloudwatch:PutMetricData"
+          Resource: "*"
+  environment:
+    AWS_ACCOUNT_ID: ${param:awsAccountId}
+    AWS_ENV: ${sls:stage}
+    AWS_REGION_ID: ${self:provider.region}
+    TAG_APP: ${param:app}
+    TAG_BLOC: ${param:bloc}
+    TAG_COMP: ${param:comp}
+    TAG_TEAM: ${param:team}
+    TZ: "Europe/Paris"
+    WAIT_SCAN_BULK_AFTER: ${param:waitScanBulkAfter}
+  stackTags:
+    App: ${param:app}
+    Bloc: ${param:bloc}
+    Comp: ${param:comp}
+    Team: ${param:team}
+    IsInfraAsCode: ${param:isInfraAsCode}
+    Env: ${sls:stage}
+    Name: ${param:stackName}
+
+functions:
+  CreateIndex:
+    name: ${param:prefix}-create-index-${sls:stage}
+    description: "Load template and create an index with pattern index_timestamp"
+    handler: "src/handlers.createIndex"
+    memorySize: 256
+    timeout: 60
+
+  FullIndex:
+    name: ${param:prefix}-full-index-${sls:stage}
+    description: "Reindex ES from DynamoDB, with page management"
+    handler: "src/handlers.fullIndex"
+    memorySize: 2048
+    timeout: 900
+
+  SwitchIndex:
+    name: ${param:prefix}-switch-index-${sls:stage}
+    description: "Switch alias to the new index"
+    handler: "src/handlers.switchIndex"
+    memorySize: 256
+    timeout: 60
+
+  RollbackIndex:
+    name: ${param:prefix}-rollback-index-${sls:stage}
+    description: "Switch alias to the new index"
+    handler: "src/handlers.rollbackIndex"
+    memorySize: 256
+    timeout: 60
+
+  DeleteUnusedIndexes:
+    name: ${param:prefix}-delete-unused-indices-${sls:stage}
+    description: "Delete unused indices"
+    handler: "src/handlers.deleteUnusedIndices"
+    memorySize: 256
+    timeout: 120
+
+stepFunctions:
+  stateMachines:
+    fullindex:
+      #      type: EXPRESS
+      name: ${param:prefix}-${sls:stage}
+      definition:
+        Comment: "Indexation"
+        StartAt: "CreateIndex"
+        States:
+          CreateIndex:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [CreateIndexLambdaFunction, Arn]
+            Next: FullIndex
+          FullIndex:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [FullIndexLambdaFunction, Arn]
+            Next: FullIndexIsCompleted
+            Retry:
+              - ErrorEquals: ["States.Timeout", "States.TaskFailed"]
+            Catch:
+              - ErrorEquals: ["States.Timeout", "States.TaskFailed"]
+                ResultPath: "$.error"
+                Next: RollbackIndex
+          FullIndexIsCompleted:
+            Type: Choice
+            Choices:
+              - Variable: "$.nextStep"
+                BooleanEquals: true
+                Next: SwitchAlias
+            Default: FullIndex
+          SwitchAlias:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [SwitchIndexLambdaFunction, Arn]
+            Next: DeleteUnusedIndices
+            Retry:
+              - ErrorEquals: ["States.Timeout", "States.TaskFailed"]
+          DeleteUnusedIndices:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [DeleteUnusedIndexesLambdaFunction, Arn]
+            Retry:
+              - ErrorEquals: ["States.Timeout", "States.TaskFailed"]
+            End: true
+          RollbackIndex:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [RollbackIndexLambdaFunction, Arn]
+            Retry:
+              - ErrorEquals: ["States.Timeout", "States.TaskFailed"]
+            End: true
+
+resources:
+  Resources:
+    SecurityGroupForLambdas:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+        GroupName: "${param:prefix}-lambdas-to-lb-${sls:stage}"
+        GroupDescription: "SecurityGroup to access from http to lambda"
+        VpcId: ${param:awsVpc}

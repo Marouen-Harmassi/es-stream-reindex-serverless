@@ -1,0 +1,35 @@
+version: 0.2
+
+env:
+  variables:
+    NPM_CACHE_DIR: ".cache/.npm"
+    TZ: "Europe/Paris"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+  pre_build:
+    commands:
+      - npm config set "//npm.pkg.github.com/:_authToken" "${GITHUB_OAUTH_TOKEN}"
+      - npm config set cache ${NPM_CACHE_DIR}
+      - npm config set color false
+  build:
+    commands:
+      - npm install
+      - |
+        if [ "${SKIP_TESTS}" != "true" ]; then
+          npm run test:ci
+        else
+          echo "SKIP TESTS !!!"
+        fi
+      - |
+        if [ "${SKIP_DEPLOY}" != "true" ]; then
+          npm run "deploy:${ENV}"
+        else
+          echo "SKIP DEPLOY, TEST BUILD !!!"
+          npm run test:compile
+        fi
+cache:
+  paths:
+    - '.cache/**/*'

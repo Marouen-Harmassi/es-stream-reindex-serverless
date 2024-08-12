@@ -1,0 +1,256 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ""
+
+Parameters:
+  Environment:
+    Description: Environment
+    Type: String
+    AllowedValues:
+      - "dev"
+      - "test"
+      - "prod"
+
+  DisplayName:
+    Description: Project's name
+    Type: String
+
+  CodeBuildBranch:
+    Description: Branch event for Codebuild
+    Type: String
+    ConstraintDescription: Must be a valid branch name.
+    Default: "release"
+    AllowedValues:
+      - "release"
+      - "production"
+
+  NotificationChannel:
+    Description: Slack Notification
+    Type: String
+    AllowedValues:
+      - ""
+
+Conditions:
+  FeatCondition: !Equals [!Ref Environment, dev]
+
+Resources:
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${DisplayName}-code-build-${Environment}"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - !Sub "arn:aws:iam::${AWS::AccountId}:policy/test-${Environment}"
+      Policies:
+        - PolicyName: !Sub "${DisplayName}-ssm-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Resource: "*"
+                Action:
+                  - "ssm:GetParameter"
+                Effect: Allow
+        - PolicyName: !Sub "${DisplayName}-ecr-access-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:BatchGetImage"
+                  - "ecr:BatchCheckLayerAvailability"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                Resource: "*"
+        - PolicyName: !Sub "${DisplayName}-code-build-s3-policy-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject*"
+                  - "s3:GetBucket*"
+                  - "s3:List*"
+                  - "s3:DeleteObject*"
+                  - "s3:PutObject*"
+                  - "s3:Abort*"
+                Resource:
+                  - !Sub "arn:aws:s3:::applications.${AWS::Region}.${AWS::AccountId}.${Environment}"
+                  - !Sub "arn:aws:s3:::applications.${AWS::Region}.${AWS::AccountId}.${Environment}/*"
+        - PolicyName: !Sub "${DisplayName}-code-build-logs-policy-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${DisplayName}-${Environment}"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${DisplayName}-${Environment}:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${DisplayName}-*-${Environment}"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${DisplayName}-*-${Environment}:*"
+        - PolicyName: !Sub "${DisplayName}-cf-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: "cloudformation:*"
+                Resource:
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${DisplayName}-*-${Environment}"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${DisplayName}-*-${Environment}/*"
+              - Effect: Allow
+                Action:
+                  - "cloudformation:ValidateTemplate"
+                  - "cloudformation:CreateUploadBucket"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "iam:passRole"
+                  - "iam:getRole"
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/test"
+        - PolicyName: !Sub "${DisplayName}-lambda-${Environment}"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:GetFunction"
+                  - "lambda:UpdateFunctionConfiguration"
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DisplayName}-*-${Environment}"
+              - Effect: Allow
+                Action:
+                  - "apigateway:GET"
+                Resource:
+                  - !Sub "arn:aws:apigateway:${AWS::Region}::/restapis"
+                  - !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/*"
+                  - !Sub "arn:aws:apigateway:${AWS::Region}::/apikeys/*"
+              - Effect: Allow
+                Action:
+                  - "apigateway:PUT"
+                Resource:
+                  - !Sub "arn:aws:apigateway:${AWS::Region}::/tags/*"
+              - Effect: "Allow"
+                Action:
+                  - "logs:TagLogGroup"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Sub "${DisplayName}-${Environment}"
+      BadgeEnabled: true
+      Source:
+        BuildSpec: "aws/codebuild/buildspec.yml"
+        GitCloneDepth: 1
+        Location: !Sub "" # TODO
+        ReportBuildStatus: true
+        Type: GITHUB
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: "aws/codebuild/standard:7.0"
+        ImagePullCredentialsType: CODEBUILD
+        EnvironmentVariables:
+          - Name: "ENV"
+            Value: !Ref "Environment"
+          - Name: "SKIP_DEPLOY"
+            Value: "false"
+          - Name: "SKIP_TESTS"
+            Value: "false"
+          - Name: "GITHUB_OAUTH_TOKEN"
+            Value: !Sub "{{resolve:secretsmanager:test-github-${Environment}:SecretString:GITHUB_OAUTH_TOKEN}}" # TODO
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: S3
+        Location: !Sub "arn:aws:s3:::applications.${AWS::Region}.${AWS::AccountId}.${Environment}/Cache"
+      ServiceRole: !Ref CodeBuildRole
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: !Sub "^refs/heads/${CodeBuildBranch}"
+
+  NotificationSlackCodeBuildEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "CodeBuildEventRule to SNS notification slack"
+      EventPattern:
+        source:
+          - "aws.codebuild"
+        detail-type:
+          - "CodeBuild Build State Change"
+        detail:
+          project-name:
+            - !Ref CodeBuildProject
+      State: "ENABLED"
+      Targets:
+        - Arn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${NotificationChannel}-${Environment}"
+          Id: !Sub "${NotificationChannel}-${Environment}"
+
+  CodeBuildFeatProject:
+    Type: "AWS::CodeBuild::Project"
+    Condition: FeatCondition
+    Properties:
+      Name: !Sub "${DisplayName}-feat-${Environment}"
+      BadgeEnabled: true
+      Source:
+        BuildSpec: "aws/codebuild/buildspec.yml"
+        GitCloneDepth: 1
+        Location: !Sub ""
+        ReportBuildStatus: true
+        Type: GITHUB
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: "aws/codebuild/standard:7.0"
+        ImagePullCredentialsType: CODEBUILD
+        EnvironmentVariables:
+          - Name: "ENV"
+            Value: !Ref "Environment"
+          - Name: "SKIP_DEPLOY"
+            Value: "true"
+          - Name: "SKIP_TESTS"
+            Value: "false"
+          - Name: "GITHUB_OAUTH_TOKEN"
+            Value: !Sub "{{resolve:secretsmanager:test-${Environment}:SecretString:GITHUB_OAUTH_TOKEN}}"
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: S3
+        Location: !Sub "arn:aws:s3:::applications.${AWS::Region}.${AWS::AccountId}.${Environment}/Cache"
+      ServiceRole: !Ref CodeBuildRole
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: ^refs/heads/(feat|fix)/.*
+
+  NotificationSlackCodeBuildFeatEventRule:
+    Type: "AWS::Events::Rule"
+    Condition: FeatCondition
+    Properties:
+      Description: "CodeBuildEventRule to SNS notification slack"
+      EventPattern:
+        source:
+          - "aws.codebuild"
+        detail-type:
+          - "CodeBuild Build State Change"
+        detail:
+          project-name:
+            - !Ref CodeBuildFeatProject
+      State: "ENABLED"
+      Targets:
+        - Arn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${NotificationChannel}-${Environment}"
+          Id: !Sub "${NotificationChannel}-${Environment}"
